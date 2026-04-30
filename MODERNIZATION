@@ -1,0 +1,124 @@
+
+---
+
+## Phase 1: High-Performance Tooling
+The goal here is to replace the aging Travis CI with **GitHub Actions** and move to a modern linting standard that supports the latest ECMAScript features.
+
+### GitHub Actions Workflow (`.github/workflows/ci.yml`)
+Instead of just running tests, set up a workflow that caches dependencies to speed up execution:
+```yaml
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22 # Current LTS for 2026
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+```
+
+
+---
+
+## Phase 2: Type Safety & Validation
+Since you prefer clean code and infrastructure-level tools, adding **Zod** for schema validation ensures that the proxy fails fast if the environment is misconfigured.
+
+### Environment Schema (`src/config.ts`)
+This prevents the "it works on my machine" syndrome by validating the `process.env` at startup:
+```typescript
+import { z } from 'zod';
+
+const envSchema = z.object({
+  PORT: z.coerce.number().default(8080),
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  CORSANYWHERE_WHITELIST: z.string()
+    .transform((val) => val.split(','))
+    .optional(),
+});
+
+export const config = envSchema.parse(process.env);
+```
+
+### Core Interface Definition
+Defining the server options in TypeScript prevents runtime errors when passing configurations:
+```typescript
+interface ProxyOptions {
+  originWhitelist?: string[];
+  requireHeader?: string[];
+  removeHeaders?: string[];
+  setHeaders?: Record<string, string>;
+  helpFile?: string;
+}
+```
+
+---
+
+## Phase 3: Security & Deployment
+Modernizing the deployment means moving away from "bare metal" scripts to a **multi-stage Docker build**. This keeps the final production image small and secure by excluding development dependencies and source code.
+
+### Multi-stage Dockerfile
+
+```dockerfile
+# Stage 1: Build
+FROM node:22-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+# Stage 2: Production
+FROM node:22-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/package*.json ./
+RUN npm ci --omit=dev
+USER node
+CMD ["node", "dist/server.js"]
+```
+
+---
+
+## Phase 4: Integration & Observability
+If you're managing this as part of a larger system (like an **Nx Monorepo**), you can treat this proxy as a specialized "app" or "service" within your workspace.
+
+### Nx Workspace Integration
+By moving the repo into an Nx workspace, you gain:
+* **Shared Types:** If your React frontend needs to know the proxy's URL or specific custom headers, you can export a shared TypeScript interface.
+* **Affected Builds:** Only rebuild/retest the proxy if the proxy code changes, not when your frontend changes.
+
+### Health Checks (`/status`)
+Add a lightweight health check to the `handleInitialRequest` logic. This is essential for container orchestrators (like Kubernetes or Docker Swarm) to know the service is alive:
+```typescript
+const handleInitialRequest = (req, res, location) => {
+  if (req.url === '/status') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'UP', uptime: process.uptime() }));
+    return true;
+  }
+  return false;
+};
+```
+
+### Modern Logging
+Replace `console.log` with **Pino**. It’s the fastest logger for Node.js and outputs NDJSON (Newline Delimited JSON), which is the standard for modern log aggregators like ELK or Grafana Loki.
+
+---
+
+### Comparison of Old vs. New
+| Feature | Original (Fork) | Modernized (Goal) |
+| :--- | :--- | :--- |
+| **Language** | Plain JavaScript | TypeScript 5.x |
+| **Module System** | CommonJS (`require`) | ES Modules (`import`) |
+| **Validation** | Manual if/else checks | Zod Schemas |
+| **CI/CD** | Travis CI | GitHub Actions |
+| **Deployment** | `node server.js` | Multi-stage Docker |
+| **Tests** | Mocha | Vitest |
+
